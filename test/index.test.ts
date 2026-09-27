@@ -424,7 +424,7 @@ test("schedules countdown redraws at the next display boundary", () => {
   assert.equal(nextResetCountdownDelayForRemainingMs(0), undefined);
 });
 
-test("formats statusline countdown outside the quota bar background", () => {
+test("uses the subdued bar background while keeping the countdown outside it", () => {
   const now = Date.parse("2026-05-28T00:00:00.000Z");
   const originalDateNow = Date.now;
   Date.now = () => now;
@@ -442,7 +442,7 @@ test("formats statusline countdown outside the quota bar background", () => {
         },
         testCtx,
       ),
-      "<fg:accent>codex</fg> <bg:selectedBg><fg:dim>██████████</fg></bg> <fg:dim>6d</fg>",
+      "<fg:accent>codex</fg> <bg:userMessageBg><fg:dim>██████████</fg></bg> <fg:dim>6d</fg>",
     );
   } finally {
     Date.now = originalDateNow;

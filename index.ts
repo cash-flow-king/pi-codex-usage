@@ -1136,7 +1136,7 @@ export function formatCodexUsageStatusline(
   const barText = formatStatuslineBarText(
     ctx,
     bar ?? "",
-    hasExhaustedQuotaWindow(report, model) ? "toolErrorBg" : "selectedBg",
+    hasExhaustedQuotaWindow(report, model) ? "toolErrorBg" : "userMessageBg",
     model,
   );
   return countdown
@@ -1299,7 +1299,7 @@ function formatStatuslineText(
 function formatStatuslineBarText(
   ctx: ExtensionContext,
   bar: string,
-  background: "selectedBg" | "toolErrorBg" = "selectedBg",
+  background: "userMessageBg" | "toolErrorBg",
   model?: CodexUsageModel,
 ): string {
   const label = ctx.ui.theme.fg("accent", activeUsageLabel(model));
@@ -1331,7 +1331,7 @@ function formatStatuslineLoading(
   return formatStatuslineBarText(
     ctx,
     formatCodexUsageLoadingBar(frame),
-    "selectedBg",
+    "userMessageBg",
     model,
   );
 }

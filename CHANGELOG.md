@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+## 0.10.1: Softer Quota Bar
+
+- Changed the normal and loading dual-quota bar background from `selectedBg` to the softer themed `userMessageBg`; exhausted quotas still use `toolErrorBg`. The bar is less prominent across dark and light themes without altering quota values or countdowns.
+
 ## 0.10.0: Business Credit Usage
 
 - Added Business-account credit usage support for responses that do not expose Codex rate-limit windows. Impact: the statusline now shows rounded remaining credit percentage and an optional reset countdown while preserving existing rate-limit displays when both forms are available.
