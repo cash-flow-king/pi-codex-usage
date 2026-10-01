@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.11.0: Shared Quota Refresh
+
+- Coordinated polling across Pi instances through one `~/.pi/agent/tmp/pi-codex-usage/usage.json`: the leader refreshes every 60 seconds, followers normally read every 30 seconds, and leadership becomes eligible for takeover after 90 seconds without a touch. Failure backoff is shared, the last successful report stays visible for up to an hour, and provisional full-availability confirmation runs only in the refreshing instance.
+- Made the JSON authoritative for request admission and fenced publication using the on-disk owner, claim generation, and lease. A non-waiting OS-backed SQLite mutex serializes claiming and publication; lock or claim-write failures deny requests, and late results cannot overwrite a successor. **Upgrade:** close all old Pi instances before starting updated ones; do not mix locking protocols or remove the mutex file while instances run.
+- **Breaking:** Removed Spark-specific quotas, labels, and source priority. All Codex models now use the primary `codex` quota; additional buckets and legacy per-bucket caches are ignored without migration. Dual-bar rendering, loading animation, reset countdowns, Business credit usage, Pi auth, and the Codex app-server fallback are preserved.
 
 ## 0.10.1: Softer Quota Bar
 

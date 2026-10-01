@@ -37,9 +37,9 @@ const codexModel = {
   provider: "openai-codex",
 };
 
-const sparkModel = {
-  id: "gpt-5.3-codex-spark",
-  name: "GPT-5.3-Codex-Spark",
+const otherCodexModel = {
+  id: "gpt-5.4",
+  name: "GPT-5.4",
   provider: "openai-codex",
 };
 
@@ -111,7 +111,7 @@ test("normalizes credits-only backend usage", () => {
   assert.equal(canReuseCachedReport(report, codexModel), true);
 });
 
-test("normalizes backend additional Spark limits", () => {
+test("ignores additional backend limits, including retired Spark quotas", () => {
   const capturedAt = Date.parse("2026-05-28T00:00:00.000Z");
   const report = normalizeBackendPayload(
     {
@@ -143,14 +143,6 @@ test("normalizes backend additional Spark limits", () => {
       primary: { usedPercent: 1 },
       secondary: { usedPercent: 92 },
     },
-    {
-      limitId: "spark",
-      primary: { usedPercent: 0 },
-      secondary: {
-        usedPercent: 0,
-        resetAt: capturedAt + 604800 * 1000,
-      },
-    },
   ]);
 });
 
@@ -173,18 +165,20 @@ test("normalizes app-server array rate limits and merges duplicate limit ids", (
     capturedAt,
   );
 
-  assert.equal(report.snapshots.length, 2);
+  assert.equal(report.snapshots.length, 1);
   assert.deepEqual(report.snapshots[0], {
     limitId: "codex",
     primary: { usedPercent: 10 },
     secondary: { usedPercent: 30 },
   });
-  assert.equal(report.snapshots[1]?.limitId, "spark");
-  assert.deepEqual(report.snapshots[1]?.primary, {
-    usedPercent: 20,
-    resetAt: capturedAt + 3600 * 1000,
-  });
-  assert.equal(report.snapshots[1]?.secondary, undefined);
+  assert.equal(report.snapshots[1], undefined);
+  assert.throws(
+    () => normalizeAppServerResponse(
+      { rateLimits: { limitId: "spark", primary: { usedPercent: 20 } } },
+      capturedAt,
+    ),
+    /no displayable rate-limit windows/,
+  );
 });
 
 test("formats the dual quota bar with 20 steps per window", () => {
@@ -505,52 +499,22 @@ test("ignores non-codex usage buckets", () => {
   );
 });
 
-test("formats active Spark status values for GPT-5.3-Codex-Spark", () => {
+test("all Codex models share the primary quota and codex status label", () => {
   const now = Date.parse("2026-05-28T00:00:00.000Z");
-
-  assert.equal(
-    formatCodexUsageStatusValue(
-      {
-        snapshots: [
-          {
-            limitId: "codex",
-            primary: { usedPercent: 1 },
-            secondary: { usedPercent: 92, resetAt: now + 2 * dayMs },
-          },
-          {
-            limitId: "spark",
-            primary: { usedPercent: 0 },
-            secondary: { usedPercent: 0, resetAt: now + 7 * dayMs },
-          },
-        ],
-      },
-      sparkModel,
-      now,
-    ),
-    "██████████ 7d",
-  );
-
-  assert.equal(
-    formatCodexUsageStatusline(
-      {
-        snapshots: [
-          {
-            limitId: "codex",
-            primary: { usedPercent: 1 },
-            secondary: { usedPercent: 92, resetAt: now + 2 * dayMs },
-          },
-          {
-            limitId: "spark",
-            primary: { usedPercent: 0 },
-            secondary: { usedPercent: 0, resetAt: now + 7 * dayMs },
-          },
-        ],
-      },
-      testCtx,
-      sparkModel,
-    ).startsWith("<fg:accent>spark</fg>"),
-    true,
-  );
+  const report = {
+    snapshots: [{
+      limitId: "codex",
+      primary: { usedPercent: 50 },
+      secondary: { usedPercent: 50 },
+    }],
+  };
+  for (const model of [codexModel, otherCodexModel]) {
+    assert.equal(formatCodexUsageStatusValue(report, model, now), "█████⠀⠀⠀⠀⠀");
+    assert.equal(
+      formatCodexUsageStatusline(report, testCtx, model),
+      "<fg:accent>codex</fg> <bg:userMessageBg><fg:dim>█████⠀⠀⠀⠀⠀</fg></bg>",
+    );
+  }
 });
 
 test("formats reusable compact Codex status values", () => {
@@ -685,7 +649,7 @@ test("detects zero usage across every available window as fully available", () =
   );
 });
 
-test("reuses cached reports only when they contain the active bucket", () => {
+test("all Codex models reuse the same cache and ignore unrelated quotas", () => {
   const codexReport = {
     snapshots: [
       {
@@ -695,7 +659,7 @@ test("reuses cached reports only when they contain the active bucket", () => {
       },
     ],
   };
-  const sparkReport = {
+  const unrelatedReport = {
     snapshots: [
       {
         limitId: "spark",
@@ -705,9 +669,10 @@ test("reuses cached reports only when they contain the active bucket", () => {
     ],
   };
 
-  assert.equal(canReuseCachedReport(codexReport, codexModel), true);
-  assert.equal(canReuseCachedReport(codexReport, sparkModel), false);
-  assert.equal(canReuseCachedReport(sparkReport, sparkModel), true);
+  for (const model of [codexModel, otherCodexModel]) {
+    assert.equal(canReuseCachedReport(codexReport, model), true);
+    assert.equal(canReuseCachedReport(unrelatedReport, model), false);
+  }
 });
 
 test("detects stale extension context errors", () => {

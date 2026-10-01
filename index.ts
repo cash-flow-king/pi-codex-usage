@@ -1,9 +1,14 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
 
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  type ExtensionAPI,
+  type ExtensionContext,
+  getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 
 const CODEX_PROVIDER_ID = "openai-codex";
@@ -16,7 +21,12 @@ const HOUR_MS = 60 * MINUTE_MS;
 const HOUR_TENTH_MS = 6 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 const DAY_TENTH_MS = 144 * MINUTE_MS;
-const REFRESH_INTERVAL_MS = 60 * SECOND_MS;
+/** How often an instance re-reads the shared file to redraw fresh data. */
+const MAX_TICK_MS = 30 * SECOND_MS;
+const MIN_TICK_MS = SECOND_MS;
+const TAKEOVER_JITTER_MS = 2 * SECOND_MS;
+/** A report older than this is no longer shown as current. */
+const STALE_REPORT_MAX_AGE_MS = HOUR_MS;
 const PROVISIONAL_RETRY_MS = SECOND_MS;
 const FULL_AVAILABILITY_CONFIRMATION_MS = 15 * SECOND_MS;
 const LOADING_FRAME_MS = 30;
@@ -24,10 +34,7 @@ const REDRAW_BLINK_MS = 150;
 const STATUS_KEY = "aa-codex-usage";
 const MAX_ERROR_BODY_CHARS = 600;
 const DEFAULT_STATUS_LABEL_TEXT = "codex";
-const SPARK_STATUS_LABEL_TEXT = "spark";
 const CODEX_USAGE_LIMIT_ID = "codex";
-const SPARK_USAGE_LIMIT_ID = "spark";
-const SPARK_MODEL_KEY = "gpt-5.3-codex-spark";
 const DUAL_BAR_WIDTH = 10;
 const TELEGRAM_STATUS_IMPORT_SPECIFIERS = [
   "@llblab/pi-telegram/status",
@@ -73,14 +80,11 @@ type QueryUsageOptions = {
   timeoutMs: number;
 };
 
-type CachedReport = {
-  createdAt: number;
-  report: CodexUsageReport;
-};
-
 type QueryUsageResult =
   | { ok: true; report: CodexUsageReport }
   | { ok: false; errors: UsageQueryError[] };
+
+type CodexSharedState = SharedState<CodexUsageReport>;
 
 export type UsageQueryError = {
   source: UsageSource;
@@ -114,12 +118,6 @@ type RateLimitStatusPayload = {
   additional_rate_limits?: unknown;
   credits?: unknown;
   spend_control?: unknown;
-};
-
-type BackendAdditionalRateLimit = {
-  limit_name?: unknown;
-  metered_feature?: unknown;
-  rate_limit?: unknown;
 };
 
 type BackendRateLimitDetails = {
@@ -170,33 +168,256 @@ type PendingRpc = {
   reject: (error: Error) => void;
 };
 
+// --- Shared Refresh ---
+
+/**
+ * Cross-instance coordination for quota polling. Every Pi instance reads one
+ * JSON file; a single "leader"
+ * refreshes it every `LEADER_INTERVAL_MS`. Any other instance may take over once
+ * the file is `TAKEOVER_AFTER_MS` old: it first claims leadership (owner and
+ * timestamp) so nobody else is due, then fetches, then stamps the result. The
+ * file is the only authority for requests and fenced publication. Writes are
+ * atomic renames; short critical sections use an OS-backed SQLite mutex.
+ */
+
+export const LEADER_INTERVAL_MS = 60_000;
+/** The leader is considered gone after missing its slot by 30 seconds. */
+export const TAKEOVER_AFTER_MS = LEADER_INTERVAL_MS + 30_000;
+/** Minimum pause between two fetch attempts of the same instance. */
+export const MIN_ATTEMPT_GAP_MS = 60_000;
+
+const STATE_FILE = "usage.json";
+const LOCK_FILE = "mutex.sqlite";
+
+export type SharedState<Report = unknown> = {
+  report?: Report;
+  /** When `report` was last fetched successfully. */
+  updatedAt?: number;
+  /**
+   * When the leader last touched the file: written when it claims a refresh,
+   * before fetching, and again when the fetch finishes.
+   */
+  claimedAt?: number;
+  /** Instance id of the current leader (the last instance to claim). */
+  owner?: string;
+  /** Unique generation for this refresh, including renewals by the same owner. */
+  claimId?: string;
+  /** Last failure message; cleared by the next success. */
+  error?: string;
+  /** The failure means "no quota available" (n/a), not a runtime error. */
+  unavailable?: boolean;
+  failures?: number;
+  /** No instance should fetch before this time. */
+  retryNotBefore?: number;
+};
+
+export function readState<Report>(
+  dir: string,
+): SharedState<Report> | undefined {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(dir, STATE_FILE), "utf8"),
+    ) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as SharedState<Report>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeState<Report>(
+  dir: string,
+  state: SharedState<Report>,
+): boolean {
+  try {
+    mkdirSync(dir, { recursive: true });
+    const temp = join(dir, `${STATE_FILE}.${process.pid}.tmp`);
+    writeFileSync(temp, JSON.stringify(state), { mode: 0o600 });
+    renameSync(temp, join(dir, STATE_FILE));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export type RefreshClaim = { owner: string; claimId: string };
+
+export type RefreshOutcome<Report> =
+  | { ok: true; report: Report }
+  | {
+      ok: false;
+      error: string;
+      unavailable?: boolean;
+      rateLimited: boolean;
+      retryAfterMs?: number;
+    };
+
+/** Read, decide and claim under the lock; never authorize an unwritten claim. */
+export function claimRefresh(
+  dir: string,
+  owner: string,
+  now?: number,
+): RefreshClaim | undefined {
+  const release = tryAcquireLock(dir);
+  if (!release) return undefined;
+  try {
+    const current = readState(dir);
+    const at = now ?? Date.now();
+    if (!isRefreshDue(current, owner, at)) return undefined;
+    const claim = { owner, claimId: randomUUID() };
+    return writeState(dir, { ...current, ...claim, claimedAt: at })
+      ? claim
+      : undefined;
+  } finally {
+    release();
+  }
+}
+
+function matchesClaim(
+  state: SharedState | undefined,
+  claim: RefreshClaim,
+  now: number,
+): boolean {
+  return (
+    state?.owner === claim.owner &&
+    state.claimId === claim.claimId &&
+    typeof state.claimedAt === "number" &&
+    now - state.claimedAt < TAKEOVER_AFTER_MS
+  );
+}
+
+/** Each admission check reads the file, not a remembered leadership flag. */
+export function ownsRefreshClaim(
+  dir: string,
+  claim: RefreshClaim,
+  now?: number,
+): boolean {
+  const current = readState(dir);
+  return matchesClaim(current, claim, now ?? Date.now());
+}
+
+/** A late success OR failure must not overwrite a successor's state. */
+export function publishRefresh<Report>(
+  dir: string,
+  claim: RefreshClaim,
+  outcome: RefreshOutcome<Report>,
+  now?: number,
+): boolean {
+  const release = tryAcquireLock(dir);
+  if (!release) return false;
+  try {
+    const current = readState<Report>(dir);
+    const at = now ?? Date.now();
+    if (!matchesClaim(current, claim, at)) return false;
+    if (outcome.ok) {
+      return writeState(dir, {
+        ...claim,
+        claimedAt: at,
+        updatedAt: at,
+        report: outcome.report,
+      });
+    }
+    const failures = (current?.failures ?? 0) + 1;
+    return writeState(dir, {
+      ...current,
+      ...claim,
+      claimedAt: at,
+      error: outcome.error,
+      unavailable: outcome.unavailable,
+      failures,
+      retryNotBefore: at + failureBackoffMs(failures, outcome),
+    });
+  } finally {
+    release();
+  }
+}
+
+/** Earliest time at which `owner` should try to refresh the state. */
+export function nextRefreshAt(
+  state: SharedState<unknown> | undefined,
+  owner: string,
+  now: number,
+): number {
+  const hold = state?.retryNotBefore ?? 0;
+  const touchedAt = Math.max(
+    state?.updatedAt ?? -Infinity,
+    state?.claimedAt ?? -Infinity,
+  );
+  if (touchedAt === -Infinity) return Math.max(now, hold);
+  const interval =
+    state?.owner === owner ? LEADER_INTERVAL_MS : TAKEOVER_AFTER_MS;
+  return Math.max(touchedAt + interval, hold);
+}
+
+export function isRefreshDue(
+  state: SharedState<unknown> | undefined,
+  owner: string,
+  now: number,
+): boolean {
+  return nextRefreshAt(state, owner, now) <= now;
+}
+
+/** Exponential failure backoff; HTTP 429 gets a longer base and cap. */
+export function failureBackoffMs(
+  failures: number,
+  options: { rateLimited: boolean; retryAfterMs?: number },
+): number {
+  const base = options.rateLimited ? 5 * 60_000 : 60_000;
+  const cap = options.rateLimited ? 30 * 60_000 : 5 * 60_000;
+  const exponential = Math.min(cap, base * 2 ** Math.max(0, failures - 1));
+  return Math.max(options.retryAfterMs ?? 0, exponential);
+}
+
+/**
+ * An empty SQLite transaction is a non-waiting, OS-backed mutex, not storage
+ * for quota or leadership. Close or process death releases it; a paused live
+ * holder cannot be evicted. Never unlink/replace mutex.sqlite while in use.
+ */
+export function tryAcquireLock(dir: string): (() => void) | undefined {
+  let database: DatabaseSync | undefined;
+  try {
+    mkdirSync(dir, { recursive: true });
+    database = new DatabaseSync(join(dir, LOCK_FILE));
+    // Contention must not wait on Pi's TUI thread; PRAGMA also works on Node 22.
+    database.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE");
+  } catch {
+    database?.close();
+    return undefined;
+  }
+  return () => {
+    const held = database;
+    database = undefined;
+    held?.close();
+  };
+}
+
 export default function codexUsage(pi: ExtensionAPI) {
-  let cache: CachedReport | undefined;
-  let failedRefreshes = 0;
-  let inFlightUsageQuery:
-    { limitId: string; promise: Promise<QueryUsageResult> } | undefined;
+  const instanceId = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const stateDir = join(getAgentDir(), "tmp", "pi-codex-usage");
+  let lastAttemptAt = 0;
+  let inFlightRefresh: Promise<void> | undefined;
+  let shown: { key?: string; report?: CodexUsageReport; updatedAt?: number } = {};
   let statuslineBlinkTimer: TimeoutHandle | undefined;
-  let statuslineClearTimer: TimeoutHandle | undefined;
   let statuslineCountdownTimer: TimeoutHandle | undefined;
   let statuslineLoadingTimer: TimeoutHandle | undefined;
   let statuslineRefreshTimer: TimeoutHandle | undefined;
   let statuslineLoadingFrame = 0;
-  let statuslineLoadingLimitId: string | undefined;
   let statuslineRequestId = 0;
-  let provisionalFullReport:
-    { limitId: string; firstSeenAt: number } | undefined;
   let unregisterTelegramStatusLine: (() => void) | undefined;
   let telegramStatusLineRegistration: Promise<void> | undefined;
+
+  const loadState = () => readState<CodexUsageReport>(stateDir);
 
   const ensureTelegramStatusLineRegistered = () => {
     if (unregisterTelegramStatusLine || telegramStatusLineRegistration) return;
     telegramStatusLineRegistration = registerCodexUsageTelegramStatusLine(
       ({ activeModel }) => {
         if (!isOpenAICodexModel(activeModel)) return undefined;
-        if (!cache) return undefined;
-        const value = formatCodexUsageStatusValue(cache.report, activeModel);
+        if (!shown.report) return undefined;
+        const value = formatCodexUsageStatusValue(shown.report, activeModel);
         return value
-          ? { label: activeUsageLabel(activeModel), value }
+          ? { label: DEFAULT_STATUS_LABEL_TEXT, value }
           : undefined;
       },
     )
@@ -210,33 +431,26 @@ export default function codexUsage(pi: ExtensionAPI) {
 
   const clearStatuslineTimers = () => {
     if (statuslineBlinkTimer) clearTimeout(statuslineBlinkTimer);
-    if (statuslineClearTimer) clearTimeout(statuslineClearTimer);
     if (statuslineCountdownTimer) clearTimeout(statuslineCountdownTimer);
     if (statuslineLoadingTimer) clearTimeout(statuslineLoadingTimer);
     if (statuslineRefreshTimer) clearTimeout(statuslineRefreshTimer);
     statuslineBlinkTimer = undefined;
-    statuslineClearTimer = undefined;
     statuslineCountdownTimer = undefined;
     statuslineLoadingTimer = undefined;
-    statuslineLoadingLimitId = undefined;
     statuslineRefreshTimer = undefined;
   };
 
   const stopStatuslineLoading = () => {
     if (statuslineLoadingTimer) clearTimeout(statuslineLoadingTimer);
     statuslineLoadingTimer = undefined;
-    statuslineLoadingLimitId = undefined;
   };
 
   const startStatuslineLoading = (
     ctx: ExtensionContext,
     model: CodexUsageModel | undefined,
   ) => {
-    const limitId = activeUsageLimitId(model);
-    if (statuslineLoadingTimer && statuslineLoadingLimitId === limitId) return;
-    stopStatuslineLoading();
+    if (statuslineLoadingTimer) return;
     statuslineLoadingFrame = Math.random() < 0.5 ? 0 : DUAL_BAR_WIDTH * 2 - 1;
-    statuslineLoadingLimitId = limitId;
     const drawNextFrame = () => {
       try {
         ctx.ui.setStatus(
@@ -260,29 +474,14 @@ export default function codexUsage(pi: ExtensionAPI) {
   const clearUsageStatusline = (ctx: ExtensionContext) => {
     statuslineRequestId += 1;
     clearStatuslineTimers();
+    shown = {};
     ctx.ui.setStatus(STATUS_KEY, undefined);
   };
 
-  const scheduleTemporaryStatuslineClear = (ctx: ExtensionContext) => {
-    if (statuslineClearTimer) clearTimeout(statuslineClearTimer);
-    statuslineClearTimer = setTimeout(() => {
-      try {
-        ctx.ui.setStatus(STATUS_KEY, undefined);
-        statuslineClearTimer = undefined;
-      } catch (error) {
-        handleTimerError(error);
-      }
-    }, REFRESH_INTERVAL_MS) as TimeoutHandle;
-    statuslineClearTimer.unref?.();
-  };
-
-  const scheduleStatuslineRefresh = (
-    ctx: ExtensionContext,
-    delayMs = REFRESH_INTERVAL_MS,
-  ) => {
+  const scheduleStatuslineRefresh = (ctx: ExtensionContext, delayMs: number) => {
     if (statuslineRefreshTimer) clearTimeout(statuslineRefreshTimer);
     statuslineRefreshTimer = setTimeout(() => {
-      void refreshCurrentCodexUsageStatusline(ctx, true).catch(
+      void refreshCurrentCodexUsageStatusline(ctx, false).catch(
         handleAsyncTimerError,
       );
     }, delayMs) as TimeoutHandle;
@@ -319,18 +518,12 @@ export default function codexUsage(pi: ExtensionAPI) {
   const setUsageStatusline = (
     ctx: ExtensionContext,
     report: CodexUsageReport,
-    options: {
-      autoRefresh: boolean;
-      blink: boolean;
-      model: CodexUsageModel | undefined;
-    },
+    options: { blink: boolean; model: CodexUsageModel | undefined },
   ) => {
     if (statuslineBlinkTimer) clearTimeout(statuslineBlinkTimer);
-    if (statuslineClearTimer) clearTimeout(statuslineClearTimer);
     if (statuslineCountdownTimer) clearTimeout(statuslineCountdownTimer);
     stopStatuslineLoading();
     statuslineBlinkTimer = undefined;
-    statuslineClearTimer = undefined;
     statuslineCountdownTimer = undefined;
     const text = formatCodexUsageStatusline(report, ctx, options.model);
     if (options.blink) {
@@ -352,32 +545,148 @@ export default function codexUsage(pi: ExtensionAPI) {
       ctx.ui.setStatus(STATUS_KEY, text);
       scheduleStatuslineCountdown(ctx, report, options.model);
     }
-    if (options.autoRefresh) scheduleStatuslineRefresh(ctx);
-    else scheduleTemporaryStatuslineClear(ctx);
   };
 
-  const queryCurrentUsage = (
+  /** Draws the shared state; skips redraws when nothing changed. */
+  const renderState = (
+    ctx: ExtensionContext,
+    state: CodexSharedState | undefined,
+    model: CodexUsageModel | undefined,
+    force: boolean,
+  ) => {
+    // Cached display data is not permission to query when the file is unreadable.
+    if (!state && shown.report && Date.now() - (shown.updatedAt ?? 0) < STALE_REPORT_MAX_AGE_MS) {
+      if (force) setUsageStatusline(ctx, shown.report, { blink: false, model });
+      return;
+    }
+    const usable =
+      state?.report &&
+      state.updatedAt !== undefined &&
+      Date.now() - state.updatedAt < STALE_REPORT_MAX_AGE_MS &&
+      canReuseCachedReport(state.report, model)
+        ? state.report
+        : undefined;
+    if (usable) {
+      const key = `report:${state?.updatedAt}`;
+      if (!force && shown.key === key) return;
+      const blink = shown.report
+        ? formatReportBar(shown.report, model) !== formatReportBar(usable, model)
+        : false;
+      shown = { key, report: usable, updatedAt: state?.updatedAt };
+      setUsageStatusline(ctx, usable, { blink, model });
+    } else if (state?.error) {
+      const key = `error:${state.error}`;
+      if (!force && shown.key === key) return;
+      shown = { key };
+      clearStatuslineTimers();
+      ctx.ui.setStatus(
+        STATUS_KEY,
+        formatStatuslineProblem(ctx, state.unavailable === true, model),
+      );
+    } else {
+      shown = { key: "loading" };
+      startStatuslineLoading(ctx, model);
+    }
+  };
+
+  /**
+   * When this instance is due (leader after 1 minute, anyone after 90 seconds) it
+   * claims leadership under the lock (owner and timestamp, so no other
+   * instance is due), then fetches, then stamps the outcome. Failures are
+   * published with a backoff so other instances do not pile on.
+   */
+  const refreshSharedState = (
     ctx: ExtensionContext,
     model: CodexUsageModel | undefined,
   ) => {
-    const limitId = activeUsageLimitId(model);
-    if (inFlightUsageQuery?.limitId === limitId)
-      return inFlightUsageQuery.promise;
-    const promise = queryUsage(
+    if (inFlightRefresh) return inFlightRefresh;
+    const promise = (async () => {
+      const claim = claimRefresh(stateDir, instanceId);
+      if (!claim) return;
+      lastAttemptAt = Date.now();
+      const result = await queryConfirmedUsage(
+        ctx,
+        model,
+        loadState()?.report,
+        () => ownsRefreshClaim(stateDir, claim),
+      );
+      if (!result) return;
+      if (result.ok) {
+        publishRefresh(stateDir, claim, result);
+        return;
+      }
+      if (result.errors.some((error) => isStaleExtensionContextError(error.cause)))
+        return;
+      publishRefresh(stateDir, claim, {
+        ok: false,
+        error: result.errors.map((error) => error.message).join("; "),
+        unavailable: isUsageUnavailable(result.errors),
+        rateLimited: result.errors.some((error) =>
+          error.message.includes("returned 429"),
+        ),
+      });
+    })().finally(() => {
+      if (inFlightRefresh === promise) inFlightRefresh = undefined;
+    });
+    inFlightRefresh = promise;
+    return promise;
+  };
+
+  /**
+   * Queries the usage. A first report claiming every window is completely
+   * unused is provisional (providers can briefly emit zeroed windows while
+   * initializing), so the claiming leader re-queries it every second for up to
+   * 15 seconds before publishing.
+   */
+  const queryConfirmedUsage = async (
+    ctx: ExtensionContext,
+    model: CodexUsageModel | undefined,
+    previous: CodexUsageReport | undefined,
+    mayQuery: () => boolean,
+  ): Promise<QueryUsageResult | undefined> => {
+    const startedAt = Date.now();
+    let result = await queryUsage(
       ctx,
       { timeoutMs: DEFAULT_TIMEOUT_MS },
       model,
-    ).finally(() => {
-      if (inFlightUsageQuery?.promise === promise)
-        inFlightUsageQuery = undefined;
-    });
-    inFlightUsageQuery = { limitId, promise };
-    return promise;
+      mayQuery,
+    );
+    if (previous && isFullyAvailableReport(previous, model)) return result;
+    while (
+      result?.ok &&
+      isFullyAvailableReport(result.report, model) &&
+      Date.now() - startedAt < FULL_AVAILABILITY_CONFIRMATION_MS
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, PROVISIONAL_RETRY_MS));
+      const retry = await queryUsage(
+        ctx,
+        { timeoutMs: DEFAULT_TIMEOUT_MS },
+        model,
+        mayQuery,
+      );
+      if (!retry) return undefined;
+      if (!retry.ok) break;
+      result = retry;
+    }
+    return result;
+  };
+
+  const nextTickDelayMs = (state: CodexSharedState | undefined) => {
+    // Nothing to show yet (e.g. a claimed fetch is in flight): poll quickly.
+    if (shown.key === "loading") return MIN_TICK_MS;
+    const now = Date.now();
+    const dueAt = Math.max(
+      nextRefreshAt(state, instanceId, now),
+      lastAttemptAt + MIN_ATTEMPT_GAP_MS,
+    );
+    const jitter =
+      state?.owner === instanceId ? 0 : Math.random() * TAKEOVER_JITTER_MS;
+    return Math.min(MAX_TICK_MS, Math.max(MIN_TICK_MS, dueAt - now + jitter));
   };
 
   const refreshCurrentCodexUsageStatusline = async (
     ctx: ExtensionContext,
-    force: boolean,
+    forceRender: boolean,
     model?: CodexUsageModel,
   ) => {
     try {
@@ -387,93 +696,26 @@ export default function codexUsage(pi: ExtensionAPI) {
         return;
       }
 
-      const usableCache =
-        cache && canReuseCachedReport(cache.report, activeModel)
-          ? cache
-          : undefined;
-      if (usableCache) {
-        setUsageStatusline(ctx, usableCache.report, {
-          autoRefresh: true,
-          blink: false,
-          model: activeModel,
-        });
-      } else {
-        startStatuslineLoading(ctx, activeModel);
-      }
       const requestId = statuslineRequestId + 1;
       statuslineRequestId = requestId;
-      const freshCache =
-        usableCache && Date.now() - usableCache.createdAt < REFRESH_INTERVAL_MS
-          ? usableCache
-          : undefined;
-      if (freshCache && !force) {
-        setUsageStatusline(ctx, freshCache.report, {
-          autoRefresh: true,
-          blink: false,
-          model: activeModel,
-        });
-        return;
-      }
+      let state = loadState();
+      renderState(ctx, state, activeModel, forceRender);
 
-      const result = await queryCurrentUsage(ctx, activeModel);
-      if (requestId !== statuslineRequestId) return;
-      if (!isOpenAICodexModel(ctx.model)) {
-        clearUsageStatusline(ctx);
-        return;
-      }
-
-      if (!result.ok) {
-        failedRefreshes += 1;
-        const activeCache =
-          cache && canReuseCachedReport(cache.report, activeModel)
-            ? cache
-            : undefined;
-        if (!activeCache || failedRefreshes >= 5) {
-          stopStatuslineLoading();
-          ctx.ui.setStatus(
-            STATUS_KEY,
-            formatStatuslineProblem(ctx, result.errors, activeModel),
-          );
-        }
-        scheduleStatuslineRefresh(ctx);
-        return;
-      }
-
-      const previousReport = cache?.report;
-      const previousWasFullyAvailable = previousReport
-        ? isFullyAvailableReport(previousReport, activeModel)
-        : false;
+      const now = Date.now();
       if (
-        isFullyAvailableReport(result.report, activeModel) &&
-        !previousWasFullyAvailable
+        isRefreshDue(state, instanceId, now) &&
+        now - lastAttemptAt >= MIN_ATTEMPT_GAP_MS
       ) {
-        const now = Date.now();
-        const limitId = activeUsageLimitId(activeModel);
-        if (provisionalFullReport?.limitId !== limitId) {
-          provisionalFullReport = { limitId, firstSeenAt: now };
-        }
-        if (
-          now - provisionalFullReport.firstSeenAt <
-          FULL_AVAILABILITY_CONFIRMATION_MS
-        ) {
-          scheduleStatuslineRefresh(ctx, PROVISIONAL_RETRY_MS);
+        await refreshSharedState(ctx, activeModel);
+        if (requestId !== statuslineRequestId) return;
+        if (!isOpenAICodexModel(ctx.model)) {
+          clearUsageStatusline(ctx);
           return;
         }
-      } else {
-        provisionalFullReport = undefined;
+        state = loadState();
+        renderState(ctx, state, activeModel, false);
       }
-      const blink = previousReport
-        ? formatReportBar(previousReport, activeModel) !==
-          formatReportBar(result.report, activeModel)
-        : false;
-      failedRefreshes = 0;
-      provisionalFullReport = undefined;
-      cache = { createdAt: Date.now(), report: result.report };
-      setUsageStatusline(ctx, result.report, {
-        autoRefresh: true,
-        blink,
-        model: activeModel,
-      });
+      scheduleStatuslineRefresh(ctx, nextTickDelayMs(state));
     } catch (error) {
       if (isStaleExtensionContextError(error)) {
         clearStatuslineTimers();
@@ -488,7 +730,7 @@ export default function codexUsage(pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
     ensureTelegramStatusLineRegistered();
     if (isOpenAICodexModel(ctx.model))
-      void refreshCurrentCodexUsageStatusline(ctx, false).catch(
+      void refreshCurrentCodexUsageStatusline(ctx, true).catch(
         handleAsyncTimerError,
       );
     else clearUsageStatusline(ctx);
@@ -496,7 +738,7 @@ export default function codexUsage(pi: ExtensionAPI) {
 
   pi.on("session_tree", (_event, ctx) => {
     if (isOpenAICodexModel(ctx.model))
-      void refreshCurrentCodexUsageStatusline(ctx, false).catch(
+      void refreshCurrentCodexUsageStatusline(ctx, true).catch(
         handleAsyncTimerError,
       );
     else clearUsageStatusline(ctx);
@@ -504,7 +746,7 @@ export default function codexUsage(pi: ExtensionAPI) {
 
   pi.on("model_select", (event, ctx) => {
     if (isOpenAICodexModel(event.model)) {
-      void refreshCurrentCodexUsageStatusline(ctx, false, event.model).catch(
+      void refreshCurrentCodexUsageStatusline(ctx, true, event.model).catch(
         handleAsyncTimerError,
       );
     } else {
@@ -538,28 +780,6 @@ function isOpenAICodexModel(
   return model?.provider === CODEX_PROVIDER_ID;
 }
 
-function isSparkCodexModel(
-  model: Pick<PiModel, "id" | "name" | "provider"> | undefined,
-): boolean {
-  if (!isOpenAICodexModel(model)) return false;
-  const key = `${model?.id ?? ""} ${model?.name ?? ""}`.toLowerCase();
-  return key.includes(SPARK_MODEL_KEY);
-}
-
-function activeUsageLimitId(
-  model: Pick<PiModel, "id" | "name" | "provider"> | undefined,
-): string {
-  return isSparkCodexModel(model) ? SPARK_USAGE_LIMIT_ID : CODEX_USAGE_LIMIT_ID;
-}
-
-function activeUsageLabel(
-  model: Pick<PiModel, "id" | "name" | "provider"> | undefined,
-): string {
-  return isSparkCodexModel(model)
-    ? SPARK_STATUS_LABEL_TEXT
-    : DEFAULT_STATUS_LABEL_TEXT;
-}
-
 async function importTelegramStatusLineModule(): Promise<
   TelegramStatusLineModule | undefined
 > {
@@ -589,27 +809,28 @@ async function queryUsage(
   ctx: ExtensionContext,
   options: Pick<QueryUsageOptions, "timeoutMs">,
   model: CodexUsageModel | undefined,
-): Promise<QueryUsageResult> {
+  mayQuery: () => boolean,
+): Promise<QueryUsageResult | undefined> {
   const errors: UsageQueryError[] = [];
-  const sources = isSparkCodexModel(model)
-    ? (["codex-app-server", "pi-auth"] as const)
-    : (["pi-auth", "codex-app-server"] as const);
+  const sources = ["pi-auth", "codex-app-server"] as const;
 
   for (const source of sources) {
+    if (!mayQuery()) return undefined;
     try {
       const report =
         source === "pi-auth"
-          ? await queryViaPiAuth(ctx, options.timeoutMs)
-          : await queryViaCodexAppServer(options.timeoutMs);
+          ? await queryViaPiAuth(ctx, options.timeoutMs, mayQuery)
+          : await queryViaCodexAppServer(options.timeoutMs, mayQuery);
+      if (!report) return undefined;
       if (
-        selectUsageSnapshot(report, activeUsageLimitId(model)) ||
+        selectUsageSnapshot(report, CODEX_USAGE_LIMIT_ID) ||
         report.credits
       ) {
         return { ok: true, report };
       }
       errors.push({
         source,
-        message: `${source} returned no displayable ${activeUsageLabel(model)} rate-limit windows`,
+        message: `${source} returned no displayable codex rate-limit windows`,
       });
     } catch (cause) {
       errors.push({ source, message: errorMessage(cause), cause });
@@ -622,7 +843,8 @@ async function queryUsage(
 async function queryViaPiAuth(
   ctx: ExtensionContext,
   timeoutMs: number,
-): Promise<CodexUsageReport> {
+  mayQuery: () => boolean,
+): Promise<CodexUsageReport | undefined> {
   const auth = await resolvePiCodexAuth(ctx);
   if (!auth) {
     throw new Error(
@@ -630,6 +852,7 @@ async function queryViaPiAuth(
     );
   }
 
+  if (!mayQuery()) return undefined;
   const response = await fetchWithTimeout(
     CODEX_USAGE_URL,
     { headers: auth.headers },
@@ -724,10 +947,12 @@ async function fetchWithTimeout(
 
 async function queryViaCodexAppServer(
   timeoutMs: number,
-): Promise<CodexUsageReport> {
+  mayQuery: () => boolean,
+): Promise<CodexUsageReport | undefined> {
   const client = new CodexAppServerClient(timeoutMs);
   try {
     await client.start();
+    if (!mayQuery()) return undefined;
     await client.request("initialize", {
       clientInfo: {
         name: "pi_codex_usage",
@@ -741,6 +966,7 @@ async function queryViaCodexAppServer(
       },
     });
     client.notify("initialized");
+    if (!mayQuery()) return undefined;
     const result = await client.request("account/rateLimits/read", undefined);
     return normalizeAppServerResponse(
       assertObject(
@@ -916,21 +1142,6 @@ export function normalizeBackendPayload(
   );
   if (primarySnapshot) snapshots.push(primarySnapshot);
 
-  if (Array.isArray(payload.additional_rate_limits)) {
-    for (const item of payload.additional_rate_limits) {
-      const additional = assertObject(
-        item,
-        "additional rate limit",
-      ) as BackendAdditionalRateLimit;
-      const snapshot = normalizeBackendSnapshot(
-        backendAdditionalLimitId(additional),
-        additional.rate_limit,
-        _capturedAt,
-      );
-      if (snapshot) snapshots.push(snapshot);
-    }
-  }
-
   const credits = normalizeBackendCredits(payload, _capturedAt);
   if (snapshots.length === 0 && !credits) {
     throw new Error(
@@ -981,13 +1192,6 @@ function normalizeBackendCredits(
   return resetAt === undefined
     ? { remainingPercent }
     : { remainingPercent, resetAt };
-}
-
-function backendAdditionalLimitId(limit: BackendAdditionalRateLimit): string {
-  const raw = `${asString(limit.limit_name) ?? ""} ${asString(limit.metered_feature) ?? ""}`;
-  return raw.toLowerCase().includes("spark")
-    ? SPARK_USAGE_LIMIT_ID
-    : (normalizedUsageKey(raw) ?? CODEX_USAGE_LIMIT_ID);
 }
 
 function normalizeBackendSnapshot(
@@ -1079,6 +1283,7 @@ function normalizeAppServerSnapshot(
     "app-server rate-limit snapshot",
   ) as AppServerRateLimitSnapshot;
   const limitId = asString(snapshot.limitId) ?? fallbackId;
+  if (normalizedUsageKey(limitId) !== CODEX_USAGE_LIMIT_ID) return undefined;
   const primary = normalizeAppServerWindow(snapshot.primary, capturedAt);
   const secondary = normalizeAppServerWindow(snapshot.secondary, capturedAt);
   if (!primary && !secondary) return undefined;
@@ -1290,9 +1495,9 @@ function formatReportBar(
 function formatStatuslineText(
   ctx: ExtensionContext,
   value: string,
-  model?: CodexUsageModel,
+  _model?: CodexUsageModel,
 ): string {
-  const label = ctx.ui.theme.fg("accent", activeUsageLabel(model));
+  const label = ctx.ui.theme.fg("accent", DEFAULT_STATUS_LABEL_TEXT);
   return `${label} ${ctx.ui.theme.fg("dim", value)}`;
 }
 
@@ -1300,9 +1505,9 @@ function formatStatuslineBarText(
   ctx: ExtensionContext,
   bar: string,
   background: "userMessageBg" | "toolErrorBg",
-  model?: CodexUsageModel,
+  _model?: CodexUsageModel,
 ): string {
-  const label = ctx.ui.theme.fg("accent", activeUsageLabel(model));
+  const label = ctx.ui.theme.fg("accent", DEFAULT_STATUS_LABEL_TEXT);
   const value = ctx.ui.theme.bg(background, ctx.ui.theme.fg("dim", bar));
   return `${label} ${value}`;
 }
@@ -1338,11 +1543,11 @@ function formatStatuslineLoading(
 
 function formatStatuslineProblem(
   ctx: ExtensionContext,
-  errors: UsageQueryError[],
-  model?: CodexUsageModel,
+  unavailable: boolean,
+  _model?: CodexUsageModel,
 ): string {
-  const label = ctx.ui.theme.fg("accent", activeUsageLabel(model));
-  const value = isUsageUnavailable(errors)
+  const label = ctx.ui.theme.fg("accent", DEFAULT_STATUS_LABEL_TEXT);
+  const value = unavailable
     ? ctx.ui.theme.fg("muted", "n/a")
     : ctx.ui.theme.fg("error", "error");
   return `${label} ${value}`;
@@ -1490,9 +1695,9 @@ function weeklyWindow(
 
 function selectActiveUsageSnapshot(
   report: CodexUsageReport,
-  model: CodexUsageModel | undefined,
+  _model: CodexUsageModel | undefined,
 ): NormalizedRateLimitSnapshot | undefined {
-  return selectUsageSnapshot(report, activeUsageLimitId(model));
+  return selectUsageSnapshot(report, CODEX_USAGE_LIMIT_ID);
 }
 
 function selectUsageSnapshot(
