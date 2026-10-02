@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0: Shared Fast Mode and Pi 1.0 Baseline
+
+- Requires Pi ≥1.0.0 across the coding-agent, AI and agent-core peers; previous hosts are outside this release's compatibility contract.
+- Added argument-free, persistent per-model `/fast` for the `openai-codex` provider with no model-ID allowlist or Fast-specific auth gate. `@llblab/pi-command-fast@^0.1.0` coordinates one command alongside Claude Usage across duplicate library copies, separate sessions and reloads; generic JSONC editing moved to that normal library. Enabled stores only `serviceTier: "priority"`; OFF removes the property.
+- Enabled Fast adds `service_tier: "priority"` to eligible Codex requests only when no tier is already present, and appends `fast` to the existing terminal status in the same dim theme color as its reset countdown, with immediate redraw and no success notification. State follows model selection and survives restart; the loading renderer tracks the newly selected model so an old timer cannot restore its previous suffix. Quota coordination and the Telegram status row are unchanged.
+- Split the monolithic entrypoint into an explicit domain DAG under `lib/`. `index.ts` only re-exports the composition root in `lib/extension.ts` and previous public contracts. The quota store, provider transport, normalized report, status lifecycle/format, Telegram adapter, and Fast override have separate owners; tests now live in `tests/` with domain-matched names.
+
 ## 0.11.0: Shared Quota Refresh
 
 - Coordinated polling across Pi instances through one `~/.pi/agent/tmp/pi-codex-usage/usage.json`: the leader refreshes every 60 seconds, followers normally read every 30 seconds, and leadership becomes eligible for takeover after 90 seconds without a touch. Failure backoff is shared, the last successful report stays visible for up to an hour, and provisional full-availability confirmation runs only in the refreshing instance.

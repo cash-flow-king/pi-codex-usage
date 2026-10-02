@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { claimRefresh, tryAcquireLock } from "../../index.ts";
+import { claimRefresh, tryAcquireLock } from "../../lib/usage-store.ts";
 
 const dir = process.argv[2];
 let release: (() => void) | undefined;

@@ -1,8 +1,10 @@
 # pi-codex-usage
 
-> Minimal zero-configuration Pi extension for showing primary ChatGPT Codex usage limits in the statusline
+> Pi extension for ChatGPT Codex usage limits and a local Fast toggle
 
 ![Codex Usage](./banner.jpg)
+
+This extension owns **usage state + usage mode**: zero-configuration quota reporting, plus an optional per-model Fast preference. Shared command arbitration and JSONC editing belong to [`@llblab/pi-command-fast`](https://github.com/llblab/pi-command-fast), a normal dependency, not another Pi extension.
 
 This repository is a minimal fork of [`narumiruna/pi-extensions/extensions/pi-codex-usage`](https://github.com/narumiruna/pi-extensions/tree/main/extensions/pi-codex-usage). It keeps the auth and quota-fetching path, but intentionally narrows the interface to the Codex quota windows returned by OpenAI.
 
@@ -26,9 +28,11 @@ This repository is a minimal fork of [`narumiruna/pi-extensions/extensions/pi-co
 - Successful updates briefly redraw the bar only when a 5% segment changes
 - Network/provider failures keep the last good bar (up to an hour), then show `error`
 - Any number of Pi instances share one request stream, see [Shared Refresh](#shared-refresh)
-- No commands or configuration are required
+- Quota display requires no configuration; `/fast` optionally toggles priority service for the active native Codex model
 
 ## Install
+
+Requires Pi ≥1.0.0 and Node ≥22.19.0. Every declared Pi package peer follows the 1.0.0 minimum.
 
 From npm:
 
@@ -41,6 +45,47 @@ From git:
 ```bash
 pi install git:github.com/llblab/pi-codex-usage
 ```
+
+## Development
+
+The shared `@llblab/pi-command-fast@^0.1.0` dependency now resolves from npm; no sibling library checkout is required.
+
+```bash
+npm ci
+npm run validate
+```
+
+For explicitly local library experiments, a temporary folder link reads the library's built `dist/`, not TypeScript source directly. Rebuild after source edits and restore the registry dependency/lock before publishing; see [Backlog](./BACKLOG.md).
+
+## Fast mode
+
+`/fast` takes no arguments and dispatches by the current **provider**, not model names or OAuth eligibility. For any `openai-codex` model, it stores only `serviceTier: "priority"` in Pi's canonical `models.json` (honoring `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "providers": {
+    "openai-codex": {
+      "modelOverrides": {
+        "your-current-model": { "serviceTier": "priority" }
+      }
+    }
+  }
+}
+```
+
+OFF removes only `serviceTier`; it never writes `"default"`. JSONC comments and unrelated configuration survive. There is no separate Fast config or model allowlist. State follows provider/model selection and survives restart; manual edits are read on lifecycle refresh and each request.
+
+When this and Claude Usage are loaded, their shared library registers **one** `/fast`, in either load order, even with separate physical dependency copies. A session-scoped WeakMap avoids cross-session dispatch; shutdown releases registrations for reload (Pi retains the session manager). Unrelated providers receive a concise unsupported-provider message. Invalid arguments show `Usage: /fast`; success is silent.
+
+Enabled native requests receive `service_tier: "priority"` only when the payload matches the current model and has no existing tier. The existing **terminal** status redraws immediately without fetching quota, for example:
+
+```text
+codex ██████▀▀▀▀ 6d fast
+```
+
+The lowercase ` fast` suffix uses the existing dim/countdown theme role and is applied at the final terminal boundary, including loading, percentages/credits, `n/a`, and errors. Telegram values and quota polling/auth/leadership are unchanged.
+
+Pi 1.0.0 accepts the extra override but does not propagate it to native request options, so a small `before_provider_request` adapter remains necessary; no replacement provider or transport is registered. Its public command API cannot hide/unregister commands by current model, so `/fast` stays listed and checks the provider at invocation. Backend capability and actual priority service are not guaranteed by a stored preference or suffix: an earlier authorized sample sent `priority` but received `default`. Priority service may have different provider pricing.
 
 ## Statusline
 
@@ -90,7 +135,7 @@ codex error
 
 ## Shared Refresh
 
-The coordination code lives in the `Shared Refresh` section of [`index.ts`](./index.ts); the extension ships as a single TypeScript source file.
+[`index.ts`](./index.ts) is a re-export-only Pi entrypoint; [`lib/extension.ts`](./lib/extension.ts) composes the live extension. [`lib/usage-store.ts`](./lib/usage-store.ts) owns cross-instance quota coordination, [`lib/query.ts`](./lib/query.ts) owns provider requests, [`lib/usage.ts`](./lib/usage.ts) owns quota normalization, [`lib/status.ts`](./lib/status.ts) and [`lib/status-format.ts`](./lib/status-format.ts) own lifecycle and terminal display, [`lib/telegram.ts`](./lib/telegram.ts) adapts the optional Telegram row, and [`lib/fast.ts`](./lib/fast.ts) owns Codex Fast semantics and the native payload bridge; the shared library owns JSONC and command arbitration. Domain tests live under [`tests/`](./tests/) with matching names; integration tests name the domain whose boundary they exercise.
 
 All Codex models and instances coordinate through `~/.pi/agent/tmp/pi-codex-usage/usage.json` (quota percentages and timestamps only, no tokens). The Claude extension uses its own independent file at `~/.pi/agent/tmp/pi-claude-usage/usage.json`.
 

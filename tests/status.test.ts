@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { isStaleExtensionContextError } from "../lib/status.ts";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -58,7 +59,7 @@ test("different Codex models share one root usage.json and claim before fetching
           getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-token" }),
         },
       };
-      extension({ on: (name, handler) => handlers.set(name, handler) });
+      extension({ on: (name, handler) => handlers.set(name, handler), registerCommand: () => {} });
       return { ctx, handlers, status: () => status };
     });
     try {
@@ -97,4 +98,20 @@ test("different Codex models share one root usage.json and claim before fetching
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("detects stale extension context errors", () => {
+  assert.equal(
+    isStaleExtensionContextError(
+      new Error(
+        "This extension ctx is stale after session replacement or reload.",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    isStaleExtensionContextError(new Error("network failed")),
+    false,
+  );
+  assert.equal(isStaleExtensionContextError("ctx is stale"), false);
 });

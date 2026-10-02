@@ -16,7 +16,7 @@ import {
   TAKEOVER_AFTER_MS,
   tryAcquireLock,
   writeState,
-} from "../index.ts";
+} from "../lib/usage-store.ts";
 
 const minuteMs = 60_000;
 const withDir = (run: (dir: string) => void | Promise<void>) => async () => {

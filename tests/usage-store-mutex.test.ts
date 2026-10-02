@@ -14,7 +14,7 @@ import {
   TAKEOVER_AFTER_MS,
   tryAcquireLock,
   writeState,
-} from "../index.ts";
+} from "../lib/usage-store.ts";
 
 type Worker = {
   child: ChildProcessWithoutNullStreams;
@@ -36,7 +36,7 @@ function setup(t: TestContext) {
   const start = async (): Promise<Worker> => {
     const child = spawn(process.execPath, [
       "--experimental-strip-types",
-      fileURLToPath(new URL("fixtures/mutex-worker.ts", import.meta.url)),
+      fileURLToPath(new URL("fixtures/usage-store-worker.ts", import.meta.url)),
       dir,
     ], { stdio: ["pipe", "pipe", "pipe"] });
     const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));

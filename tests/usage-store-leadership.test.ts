@@ -80,7 +80,7 @@ for (const scenario of scenarios) {
           },
         },
       };
-      module.default({ on: (name, handler) => handlers.set(name, handler) });
+      module.default({ on: (name, handler) => handlers.set(name, handler), registerCommand: () => {} });
       try {
         handlers.get("session_start")({}, ctx);
         if (scenario === "display") {
