@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.1: Telegram Fast Status
+
+- The optional Telegram status row now appends lowercase ` fast` for the active Codex model, or shows `fast` alone when quota is unavailable. It rereads the per-model preference at menu render time, so toggles, model changes and manual edits do not wait for quota refresh. Quota polling, auth, request adaptation and terminal behavior are unchanged; isolated tests cover enabled/disabled state, model/provider changes and unreadable configuration.
+
 ## 0.12.0: Shared Fast Mode and Pi 1.0 Baseline
 
 - Requires Pi ≥1.0.0 across the coding-agent, AI and agent-core peers; previous hosts are outside this release's compatibility contract.

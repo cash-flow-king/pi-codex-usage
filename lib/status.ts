@@ -4,11 +4,10 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { isFastEnabled, isFastEligibleModel } from "./fast.ts";
 import { claimRefresh, isRefreshDue, nextRefreshAt, ownsRefreshClaim, publishRefresh, readState, type SharedState, MIN_ATTEMPT_GAP_MS } from "./usage-store.ts";
 import { canReuseCachedReport, isFullyAvailableReport, isOpenAICodexModel, isUsageUnavailable, type CodexUsageModel, type CodexUsageReport } from "./usage.ts";
-import { appendFastStatus, formatReportBar, formatStatuslineLoading, formatStatuslineProblem, formatCodexUsageStatusValue, formatCodexUsageStatusline, nextResetCountdownDelayMs } from "./status-format.ts";
+import { appendFastStatus, formatReportBar, formatStatuslineLoading, formatStatuslineProblem, formatCodexUsageStatusline, nextResetCountdownDelayMs } from "./status-format.ts";
 import { queryUsage, type QueryUsageResult } from "./query.ts";
-import { registerCodexUsageTelegramStatusLine } from "./telegram.ts";
+import { codexUsageTelegramStatusLine, registerCodexUsageTelegramStatusLine } from "./telegram.ts";
 
-const DEFAULT_STATUS_LABEL_TEXT = "codex";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SECOND_MS = 1000;
 const MINUTE_MS = 60 * SECOND_MS;
@@ -64,14 +63,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
   const ensureTelegramStatusLineRegistered = () => {
     if (unregisterTelegramStatusLine || telegramStatusLineRegistration) return;
     telegramStatusLineRegistration = registerCodexUsageTelegramStatusLine(
-      ({ activeModel }) => {
-        if (!isOpenAICodexModel(activeModel)) return undefined;
-        if (!shown.report) return undefined;
-        const value = formatCodexUsageStatusValue(shown.report, activeModel);
-        return value
-          ? { label: DEFAULT_STATUS_LABEL_TEXT, value }
-          : undefined;
-      },
+      ({ activeModel }) => codexUsageTelegramStatusLine(shown.report, activeModel),
     )
       .then((unregister) => {
         unregisterTelegramStatusLine = unregister;

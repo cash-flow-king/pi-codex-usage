@@ -83,7 +83,7 @@ Enabled native requests receive `service_tier: "priority"` only when the payload
 codex ██████▀▀▀▀ 6d fast
 ```
 
-The lowercase ` fast` suffix uses the existing dim/countdown theme role and is applied at the final terminal boundary, including loading, percentages/credits, `n/a`, and errors. Telegram values and quota polling/auth/leadership are unchanged.
+The lowercase ` fast` suffix uses the existing dim/countdown theme role and is applied at the final terminal boundary, including loading, percentages/credits, `n/a`, and errors. Telegram also appends plain-text ` fast` for the active model; quota polling/auth/leadership are unchanged.
 
 Pi 1.0.0 accepts the extra override but does not propagate it to native request options, so a small `before_provider_request` adapter remains necessary; no replacement provider or transport is registered. Its public command API cannot hide/unregister commands by current model, so `/fast` stays listed and checks the provider at invocation. Backend capability and actual priority service are not guaranteed by a stored preference or suffix: an earlier authorized sample sent `priority` but received `default`. Priority service may have different provider pricing.
 
@@ -161,7 +161,7 @@ If `@llblab/pi-telegram` is loaded with the public status-line provider API, thi
 codex: ██████▀▀▀▀ 6d
 ```
 
-The value is the same compact quota bar plus weekly reset countdown used by the terminal statusline, always with the `codex` label. If `pi-telegram` is absent, older, or the active model is not a Codex subscription model, no Telegram row is added.
+The value is the same compact quota bar plus weekly reset countdown used by the terminal statusline, always with the `codex` label. When Fast is enabled for the active model, it appends plain-text ` fast`; without a usable quota report it shows `codex: fast`. The preference is reread when the menu is rendered, so toggles and model changes do not depend on a quota refresh. If `pi-telegram` is absent, older, or the active model is not a Codex subscription model, no Telegram row is added.
 
 ## Auth
 

@@ -1,6 +1,6 @@
 {
   "name": "@llblab/pi-codex-usage",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": false,
   "description": "Pi extension for Codex subscription usage and an optional Fast toggle",
   "keywords": [
