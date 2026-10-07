@@ -12,7 +12,7 @@ test("every declared Pi peer has the 1.0.0 minimum", () => {
     if (name.startsWith("@earendil-works/")) assert.equal(range, ">=1.0.0", name);
 });
 
-test("provider-level shared /fast persists, dispatches, redraws every status and never fetches quota", async () => {
+test("catalog-gated shared /fast persists, dispatches, redraws every status and never fetches quota", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-fast-codex-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   const previousFetch = globalThis.fetch;
@@ -23,7 +23,7 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
   const commands: Array<(args: string, ctx: any) => Promise<void>> = [];
   const statuses: Array<string | undefined> = [];
   const notices: string[] = [];
-  const model = { id: "future-codex-model", name: "Future", provider: "openai-codex", api: "openai-codex-responses" };
+  const model = { id: "gpt-6.1-sol", name: "Sol", provider: "openai-codex", api: "openai-codex-responses" };
   const ctx = { sessionManager: {}, model, ui: {
     setStatus: (key: string, text: string | undefined) => { assert.equal(key, "aa-codex-usage"); statuses.push(text); },
     notify: (text: string) => notices.push(text),
@@ -56,9 +56,13 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
     assert.equal(notices.length, 0);
     const request = handlers.get("before_provider_request")![0];
     assert.deepEqual(request({ payload: { model: model.id } }, ctx), { model: model.id, service_tier: "priority" });
-    assert.equal(request({ payload: { model: model.id, service_tier: "flex" } }, ctx), undefined);
+    assert.deepEqual(request({ payload: { model: model.id, service_tier: "flex" } }, ctx), { model: model.id, service_tier: "priority" });
+    const headers = handlers.get("before_provider_headers")![0];
+    const headerEvent = { headers: { "x-other": "kept" } };
+    headers(headerEvent, ctx);
+    assert.deepEqual(headerEvent.headers, { "x-other": "kept", "x-codex-routing-hint": "model=gpt-6.1-sol;tier=priority" });
     assert.equal(request({ payload: { model: "different" } }, ctx), undefined);
-    const other = { ...model, id: "another-future-model" };
+    const other = { ...model, id: "gpt-6-astra" };
     ctx.model = other;
     await emit("model_select", { model: other });
     assert.equal(statuses.at(-1), "codex 67%");
@@ -85,6 +89,11 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
     assert.equal(isFastEnabled(model.id), false);
     assert.doesNotMatch(statuses.at(-1)!, / fast$/);
     assert.equal(request({ payload: { model: model.id } }, ctx), undefined);
+    const offHeaders = { headers: {} };
+    headers(offHeaders, ctx);
+    assert.deepEqual(offHeaders.headers, {});
+    await command("", { ...ctx, model: { ...model, id: "gpt-daybreak-red-latest" } });
+    assert.equal(notices.pop(), "Fast is not advertised for this Codex model");
     writeFileSync(join(dir, "models.json"), '{ "providers": ');
     await emit("model_select", { model });
     assert.doesNotMatch(statuses.at(-1)!, / fast$/);
