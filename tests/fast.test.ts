@@ -51,9 +51,11 @@ test("malformed models.json is neither overwritten nor treated as enabled", () =
   assert.equal(readFileSync(path, "utf8"), '{ "providers": ');
 }));
 
-test("Codex Fast capability is provider-level, including arbitrary future models", () => {
-  const model = { provider: "openai-codex", id: "future-codex-model" };
-  assert.equal(isFastEligibleModel(model as never), true);
+test("Codex Fast capability follows the advertised model snapshot", () => {
+  const model = { provider: "openai-codex", id: "gpt-6.1-sol" };
+  assert.equal(isFastEligibleModel(model), true);
+  assert.equal(isFastEligibleModel({ ...model, id: "future-codex-model" }), false);
+  assert.equal(isFastEligibleModel({ ...model, id: "gpt-daybreak-red-latest" }), false);
   assert.equal(isFastEligibleModel({ ...model, provider: "deepseek" } as never), false);
   assert.equal(isFastEligibleModel(undefined), false);
 });
@@ -62,7 +64,7 @@ test("request decoration is limited to an enabled, matching model and does not m
   const body = { model: "gpt-5.5", input: [{ text: "secret" }] };
   assert.equal(applyFastToRequest(body, "gpt-5.5", false), undefined);
   assert.equal(applyFastToRequest({ model: "gpt-5.4" }, "gpt-5.5", true), undefined);
-  assert.equal(applyFastToRequest({ ...body, service_tier: "default" }, "gpt-5.5", true), undefined);
+  assert.deepEqual(applyFastToRequest({ ...body, service_tier: "default" }, "gpt-5.5", true), { ...body, service_tier: "priority" });
   assert.deepEqual(applyFastToRequest(body, "gpt-5.5", true), { ...body, service_tier: "priority" });
   assert.equal(Object.hasOwn(body, "service_tier"), false);
 });

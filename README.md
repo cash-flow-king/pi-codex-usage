@@ -59,7 +59,7 @@ For explicitly local library experiments, a temporary folder link reads the libr
 
 ## Fast mode
 
-`/fast` takes no arguments and dispatches by the current **provider**, not model names or OAuth eligibility. For any `openai-codex` model, it stores only `serviceTier: "priority"` in Pi's canonical `models.json` (honoring `PI_CODING_AGENT_DIR`):
+`/fast` takes no arguments and dispatches by the current provider. For standard `openai-codex` inference models advertised with `priority` in the Codex catalog snapshot (2026-10-07), it stores `serviceTier: "priority"` in Pi's canonical `models.json` (honoring `PI_CODING_AGENT_DIR`). Unsupported and unknown models are rejected:
 
 ```json
 {
@@ -73,11 +73,11 @@ For explicitly local library experiments, a temporary folder link reads the libr
 }
 ```
 
-OFF removes only `serviceTier`; it never writes `"default"`. JSONC comments and unrelated configuration survive. There is no separate Fast config or model allowlist. State follows provider/model selection and survives restart; manual edits are read on lifecycle refresh and each request.
+OFF removes only `serviceTier`; it never writes `"default"`. JSONC comments and unrelated configuration survive. A fail-closed model capability snapshot lives in `lib/fast.ts`; update it when the official Codex catalog changes. State follows provider/model selection and survives restart; manual edits are read on lifecycle refresh and each request.
 
 When this and Claude Usage are loaded, their shared library registers **one** `/fast`, in either load order, even with separate physical dependency copies. A session-scoped WeakMap avoids cross-session dispatch; shutdown releases registrations for reload (Pi retains the session manager). Unrelated providers receive a concise unsupported-provider message. Invalid arguments show `Usage: /fast`; success is silent.
 
-Enabled native requests receive `service_tier: "priority"` only when the payload matches the current model and has no existing tier. The existing **terminal** status redraws immediately without fetching quota, for example:
+Enabled native requests request `service_tier: "priority"` when the payload matches the selected supported model. `/fast` ON takes precedence over any existing request tier (including `default` or `flex`); OFF removes the extension override but does not guarantee standard service when the model's catalog default is `priority`. The terminal status redraws immediately without fetching quota, for example:
 
 ```text
 codex ██████▀▀▀▀ 6d fast
@@ -85,7 +85,7 @@ codex ██████▀▀▀▀ 6d fast
 
 The lowercase ` fast` suffix uses the existing dim/countdown theme role and is applied at the final terminal boundary, including loading, percentages/credits, `n/a`, and errors. Telegram also appends plain-text ` fast` for the active model; quota polling/auth/leadership are unchanged.
 
-Pi 1.0.0 accepts the extra override but does not propagate it to native request options, so a small `before_provider_request` adapter remains necessary; no replacement provider or transport is registered. Its public command API cannot hide/unregister commands by current model, so `/fast` stays listed and checks the provider at invocation. Backend capability and actual priority service are not guaranteed by a stored preference or suffix: an earlier authorized sample sent `priority` but received `default`. Priority service may have different provider pricing.
+Pi 1.0.4 accepts the extra override but does not forward it to native request options, so the `before_provider_request` adapter remains necessary. The `before_provider_headers` adapter requests `x-codex-routing-hint: model=<model>;tier=priority` for an active supported Codex model when Fast is enabled. **This is best-effort, not full Codex parity**: Pi's header hook runs before payload hooks and exposes the selected model, not the actual request model; background requests or subsequent hooks may disagree with the header. A cached WebSocket also retains its previous handshake headers across Fast changes; restart the Pi session or use SSE until Pi supports tier-aware connection handling. Pi's internal `serviceTier` accounting option is likewise not updated. Backend acceptance of priority cannot be guaranteed by the status indicator.
 
 ## Statusline
 

@@ -14,10 +14,10 @@ test("Telegram renders current-model Fast independently of quota and terminal ca
       import { writeFileSync } from "node:fs";
       import { join } from "node:path";
       const { codexUsageTelegramStatusLine: row } = await import(${JSON.stringify(new URL("../lib/telegram.ts", import.meta.url).href)});
-      const model = { provider: "openai-codex", id: "gpt-5.4", name: "GPT" };
+      const model = { provider: "openai-codex", id: "gpt-5.5", name: "GPT" };
       const report = { snapshots: [{ limitId: "codex", secondary: { usedPercent: 25 } }] };
       const path = join(process.env.PI_CODING_AGENT_DIR, "models.json");
-      const set = enabled => writeFileSync(path, JSON.stringify({ providers: { "openai-codex": { modelOverrides: { "gpt-5.4": enabled ? { serviceTier: "priority" } : {} } } } }));
+      const set = enabled => writeFileSync(path, JSON.stringify({ providers: { "openai-codex": { modelOverrides: { "gpt-5.5": enabled ? { serviceTier: "priority" } : {} } } } }));
       set(false);
       const plain = row(report, model);
       assert.ok(plain);
