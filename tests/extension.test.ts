@@ -12,7 +12,7 @@ test("every declared Pi peer has the 1.0.0 minimum", () => {
     if (name.startsWith("@earendil-works/")) assert.equal(range, ">=1.0.0", name);
 });
 
-test("provider-level shared /fast persists, dispatches, redraws every status and never fetches quota", async () => {
+for (const provider of ["openai-codex", "openai"]) test(`${provider}: shared /fast persists, dispatches, redraws every status and never fetches quota`, async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-fast-codex-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   const previousFetch = globalThis.fetch;
@@ -23,7 +23,7 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
   const commands: Array<(args: string, ctx: any) => Promise<void>> = [];
   const statuses: Array<string | undefined> = [];
   const notices: string[] = [];
-  const model = { id: "future-codex-model", name: "Future", provider: "openai-codex", api: "openai-codex-responses" };
+  const model = { id: "future-model", name: "Future", provider, api: provider === "openai" ? "openai-responses" : "openai-codex-responses" };
   const ctx = { sessionManager: {}, model, ui: {
     setStatus: (key: string, text: string | undefined) => { assert.equal(key, "aa-codex-usage"); statuses.push(text); },
     notify: (text: string) => notices.push(text),
@@ -51,13 +51,24 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
     assert.equal(notices.pop(), "Fast mode is not supported for the current provider");
     assert.equal(existsSync(join(dir, "models.json")), false);
     await command("", ctx);
-    assert.equal(isFastEnabled(model.id), true);
+    assert.equal(isFastEnabled(model), true);
     assert.equal(statuses.at(-1), "codex 67% fast");
     assert.equal(notices.length, 0);
     const request = handlers.get("before_provider_request")![0];
     assert.deepEqual(request({ payload: { model: model.id } }, ctx), { model: model.id, service_tier: "priority" });
     assert.equal(request({ payload: { model: model.id, service_tier: "flex" } }, ctx), undefined);
     assert.equal(request({ payload: { model: "different" } }, ctx), undefined);
+    const sibling = { ...model, provider: provider === "openai" ? "openai-codex" : "openai" };
+    ctx.model = sibling;
+    await emit("model_select", { model: sibling });
+    assert.equal(statuses.at(-1), "codex 67%");
+    assert.equal(request({ payload: { model: sibling.id } }, ctx), undefined);
+    await command("", ctx);
+    assert.equal(isFastEnabled(sibling), true);
+    assert.equal(statuses.at(-1), "codex 67% fast");
+    await command("", ctx);
+    assert.equal(isFastEnabled(sibling), false);
+    assert.equal(isFastEnabled(model), true);
     const other = { ...model, id: "another-future-model" };
     ctx.model = other;
     await emit("model_select", { model: other });
@@ -82,7 +93,7 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
     assert.match(statuses.at(-1)!, / fast$/); // Loading also passes through the one terminal boundary.
     await command("", ctx);
     await new Promise(resolve => setTimeout(resolve, 180));
-    assert.equal(isFastEnabled(model.id), false);
+    assert.equal(isFastEnabled(model), false);
     assert.doesNotMatch(statuses.at(-1)!, / fast$/);
     assert.equal(request({ payload: { model: model.id } }, ctx), undefined);
     writeFileSync(join(dir, "models.json"), '{ "providers": ');
@@ -92,6 +103,13 @@ test("provider-level shared /fast persists, dispatches, redraws every status and
     assert.match(notices.at(-1)!, /^Could not update models\.json:/);
     assert.equal(readFileSync(join(dir, "models.json"), "utf8"), '{ "providers": ');
     assert.equal(fetches, 0);
+    await emit("session_shutdown");
+    for (const selected of [model, sibling]) {
+      await command("", { ...ctx, model: selected });
+      assert.equal(notices.at(-1), "Fast mode is not supported for the current provider");
+    }
+    await emit("session_start");
+    assert.equal(commands.length, 2);
   } finally {
     await emit("session_shutdown");
     globalThis.fetch = previousFetch;

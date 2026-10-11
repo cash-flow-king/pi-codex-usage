@@ -2,8 +2,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { assertObject, errorMessage, normalizeAppServerResponse, normalizeBackendPayload, parseJsonObject, selectUsageSnapshot, type AppServerRateLimitResponse, type CodexUsageModel, type CodexUsageReport, type RateLimitStatusPayload, type UsageQueryError } from "./usage.ts";
-const CODEX_PROVIDER_ID = "openai-codex";
+import { assertObject, errorMessage, isOpenAICodexModel, normalizeAppServerResponse, normalizeBackendPayload, parseJsonObject, selectUsageSnapshot, type AppServerRateLimitResponse, type CodexUsageModel, type CodexUsageReport, type RateLimitStatusPayload, type UsageQueryError } from "./usage.ts";
 const CODEX_USAGE_LIMIT_ID = "codex";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const MAX_ERROR_BODY_CHARS = 600;
@@ -64,7 +63,7 @@ async function queryViaPiAuth(
   const auth = await resolvePiCodexAuth(ctx);
   if (!auth) {
     throw new Error(
-      "No Pi OpenAI Codex subscription auth was available. Use a Pi OpenAI Codex model or run /login for OpenAI ChatGPT Plus/Pro (Codex).",
+      "No Pi OpenAI Codex subscription auth was available. Use an openai or openai-codex subscription model or run /login for OpenAI ChatGPT.",
     );
   }
 
@@ -96,6 +95,7 @@ async function resolvePiCodexAuth(
   const errors: string[] = [];
 
   for (const model of models) {
+    if (model.provider === "openai" && !ctx.modelRegistry.isUsingOAuth(model)) continue;
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok) {
       errors.push(auth.error);
@@ -127,7 +127,7 @@ function codexAuthCandidateModels(ctx: ExtensionContext): PiModel[] {
   const candidates: PiModel[] = [];
   const seen = new Set<string>();
   const add = (model: PiModel | undefined) => {
-    if (!model || model.provider !== CODEX_PROVIDER_ID) return;
+    if (!model || !isOpenAICodexModel(model)) return;
     const key = `${model.provider}/${model.id}`;
     if (seen.has(key)) return;
     seen.add(key);

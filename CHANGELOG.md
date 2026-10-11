@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.0: OpenAI Subscription Provider Support
+
+- Added `openai` alongside `openai-codex` for `/fast`, request priority adaptation, terminal status and the optional Telegram row. Fast preferences remain isolated by provider/model, including identical model IDs. Both providers share the existing Codex subscription quota stream. Pi subscription OAuth under `openai` now fetches quota directly without requiring the legacy provider; `openai` API-key auth is skipped and the Codex CLI fallback is preserved.
+
 ## 0.12.1: Telegram Fast Status
 
 - The optional Telegram status row now appends lowercase ` fast` for the active Codex model, or shows `fast` alone when quota is unavailable. It rereads the per-model preference at menu render time, so toggles, model changes and manual edits do not wait for quota refresh. Quota polling, auth, request adaptation and terminal behavior are unchanged; isolated tests cover enabled/disabled state, model/provider changes and unreadable configuration.

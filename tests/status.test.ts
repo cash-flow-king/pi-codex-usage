@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-test("different Codex models share one root usage.json and claim before fetching", async () => {
+test("OpenAI and Codex models share one root usage.json and use active subscription auth after claiming", async () => {
   const dir = mkdtempSync(join(tmpdir(), "codex-shared-refresh-"));
   // Isolate Pi's agent directory and module-level configuration in a child.
   // Fetch is mocked: this test must never query subscription endpoints.
@@ -46,7 +46,7 @@ test("different Codex models share one root usage.json and claim before fetching
     const instances = Array.from({ length: 6 }, (_, i) => {
       const handlers = new Map();
       let status;
-      const model = { provider: "openai-codex", id: "model-" + i, name: "Model " + i };
+      const model = { provider: i % 2 === 0 ? "openai" : "openai-codex", id: "model-" + i, name: "Model " + i };
       const ctx = {
         model,
         ui: {
@@ -56,7 +56,11 @@ test("different Codex models share one root usage.json and claim before fetching
         modelRegistry: {
           getAvailable: () => [model],
           getAll: () => [model],
-          getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-token" }),
+          isUsingOAuth: () => true,
+          getApiKeyAndHeaders: async (candidate) => {
+            assert.equal(candidate.provider, model.provider);
+            return { ok: true, apiKey: "test-token" };
+          },
         },
       };
       extension({ on: (name, handler) => handlers.set(name, handler), registerCommand: () => {} });

@@ -41,20 +41,20 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
   let statuslineRequestId = 0;
   let unregisterTelegramStatusLine: (() => void) | undefined;
   let telegramStatusLineRegistration: Promise<void> | undefined;
-  let fastModelId: string | undefined;
+  let fastModel: PiModel | undefined;
   let fastEnabled = false;
   let lastStatusText: string | undefined;
   let loadingModel: CodexUsageModel | undefined;
 
-  const syncFast = (model: PiModel | undefined, ctx: ExtensionContext) => {
-    fastModelId = isFastEligibleModel(model) ? model.id : undefined;
-    fastEnabled = fastModelId !== undefined && isFastEnabled(fastModelId);
+  const syncFast = (model: PiModel | undefined) => {
+    fastModel = isFastEligibleModel(model) ? model : undefined;
+    fastEnabled = fastModel !== undefined && isFastEnabled(fastModel);
   };
   const setCodexStatus = (ctx: ExtensionContext, text: string | undefined, model?: CodexUsageModel) => {
     lastStatusText = text;
     ctx.ui.setStatus(STATUS_KEY, text === undefined ? undefined : appendFastStatus(
       ctx, text,
-      fastEnabled && model?.id === fastModelId,
+      fastEnabled && model?.provider === fastModel?.provider && model?.id === fastModel?.id,
     ));
   };
 
@@ -95,7 +95,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     model: CodexUsageModel | undefined,
   ) => {
-    const modelChanged = loadingModel?.id !== model?.id;
+    const modelChanged = loadingModel?.provider !== model?.provider || loadingModel?.id !== model?.id;
     loadingModel = model;
     if (statuslineLoadingTimer) {
       if (modelChanged && lastStatusText !== undefined) setCodexStatus(ctx, lastStatusText, model);
@@ -331,7 +331,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
     try {
       const activeModel = model ?? ctx.model;
       const previousFast = fastEnabled;
-      syncFast(activeModel, ctx);
+      syncFast(activeModel);
       forceRender ||= previousFast !== fastEnabled;
       if (!isOpenAICodexModel(activeModel)) {
         clearUsageStatusline(ctx);
@@ -370,7 +370,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
   ensureTelegramStatusLineRegistered();
 
   pi.on("session_start", (_event, ctx) => {
-    syncFast(ctx.model, ctx);
+    syncFast(ctx.model);
     ensureTelegramStatusLineRegistered();
     if (isOpenAICodexModel(ctx.model))
       void refreshCurrentCodexUsageStatusline(ctx, true).catch(
@@ -388,7 +388,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
   });
 
   pi.on("model_select", (event, ctx) => {
-    syncFast(event.model, ctx);
+    syncFast(event.model);
     if (isOpenAICodexModel(event.model)) {
       void refreshCurrentCodexUsageStatusline(ctx, true, event.model).catch(
         handleAsyncTimerError,
@@ -405,7 +405,7 @@ export function createCodexUsageStatus(pi: ExtensionAPI) {
   });
   return {
     fastChanged(ctx: ExtensionContext, model: PiModel) {
-      syncFast(model, ctx);
+      syncFast(model);
       if (lastStatusText !== undefined) setCodexStatus(ctx, lastStatusText, model);
       renderState(ctx, loadState(), model, true);
     },

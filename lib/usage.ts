@@ -4,8 +4,9 @@ const SECOND_MS = 1000;
 const CODEX_USAGE_LIMIT_ID = "codex";
 type PiModel = NonNullable<ExtensionContext["model"]>;
 export type CodexUsageModel = Pick<PiModel, "id" | "name" | "provider">;
+export const OPENAI_USAGE_PROVIDERS = ["openai-codex", "openai"] as const;
 export function isOpenAICodexModel(model: Pick<PiModel, "provider"> | undefined): boolean {
-  return model?.provider === "openai-codex";
+  return OPENAI_USAGE_PROVIDERS.some((provider) => model?.provider === provider);
 }
 export type UsageSource = "pi-auth" | "codex-app-server";
 export type UsageQueryError = { source: UsageSource; message: string; cause?: unknown };

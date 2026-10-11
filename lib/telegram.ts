@@ -29,7 +29,7 @@ export function codexUsageTelegramStatusLine(
 ): TelegramStatusLineProviderResult {
   if (!activeModel || !isOpenAICodexModel(activeModel)) return undefined;
   const value = report ? formatCodexUsageStatusValue(report, activeModel) : undefined;
-  const fast = isFastEnabled(activeModel.id);
+  const fast = isFastEnabled(activeModel);
   if (!value && !fast) return undefined;
   return { label: "codex", value: value ? `${value}${fast ? " fast" : ""}` : "fast" };
 }

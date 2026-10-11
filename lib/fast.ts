@@ -3,16 +3,17 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isModelOverrideValue, toggleModelOverrideValue } from "@llblab/pi-command-fast";
 import { isOpenAICodexModel } from "./usage.ts";
 
-const target = (id: string) => ({ provider: "openai-codex", id, property: "serviceTier", enabledValue: "priority" });
+type FastModel = Pick<NonNullable<ExtensionContext["model"]>, "provider" | "id">;
+const target = (model: FastModel) => ({ provider: model.provider, id: model.id, property: "serviceTier", enabledValue: "priority" });
 
 export function isFastEligibleModel(model: ExtensionContext["model"]): model is NonNullable<ExtensionContext["model"]> {
   return !!model && isOpenAICodexModel(model);
 }
-export function isFastEnabled(modelId: string, path?: string): boolean {
-  return isModelOverrideValue(target(modelId), path);
+export function isFastEnabled(model: FastModel, path?: string): boolean {
+  return isModelOverrideValue(target(model), path);
 }
-export function toggleFast(modelId: string, path?: string): boolean {
-  return toggleModelOverrideValue(target(modelId), path);
+export function toggleFast(model: FastModel, path?: string): boolean {
+  return toggleModelOverrideValue(target(model), path);
 }
 
 export function applyFastToRequest(payload: unknown, modelId: string, enabled: boolean): unknown {

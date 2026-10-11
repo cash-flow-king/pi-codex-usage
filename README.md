@@ -19,16 +19,16 @@ This repository is a minimal fork of [`narumiruna/pi-extensions/extensions/pi-co
 - Shows two counter-moving half-height markers in the statusline bar while Codex usage is loading, then keeps the bar fresh (the countdown ticks locally)
 - Keeps the last usable bar visible during ordinary refreshes instead of replacing known quota with a loading state
 - Statusline output adapts to the response: weekly-only limits show an explicit remaining percentage and reset countdown, while dual-window limits keep the compact themed bar
-- All Codex subscription models share the primary `codex` quota and status label
-- When `pi-telegram` is available, the same compact value appears as `codex: <value>` in the `/start` menu status text for active OpenAI Codex subscription models
+- Models under either `openai-codex` or `openai` show the same primary Codex subscription quota and `codex` status label (not OpenAI API billing limits)
+- When `pi-telegram` is available, the same compact value appears as `codex: <value>` in the `/start` menu status text for either supported provider
 - Additional returned quota buckets are ignored
-- Pi OpenAI Codex provider auth is used first
+- Pi subscription auth from `openai` or legacy `openai-codex` is used first
 - Codex CLI app-server remains available as a fallback
 - Missing auth, subscription, plan, or quota windows are shown as `n/a`, not as an error
 - Successful updates briefly redraw the bar only when a 5% segment changes
 - Network/provider failures keep the last good bar (up to an hour), then show `error`
 - Any number of Pi instances share one request stream, see [Shared Refresh](#shared-refresh)
-- Quota display requires no configuration; `/fast` optionally toggles priority service for the active native Codex model
+- Quota display requires no configuration; `/fast` optionally toggles priority service for the active `openai-codex` or `openai` model
 
 ## Install
 
@@ -59,7 +59,7 @@ For explicitly local library experiments, a temporary folder link reads the libr
 
 ## Fast mode
 
-`/fast` takes no arguments and dispatches by the current **provider**, not model names or OAuth eligibility. For any `openai-codex` model, it stores only `serviceTier: "priority"` in Pi's canonical `models.json` (honoring `PI_CODING_AGENT_DIR`):
+`/fast` takes no arguments and dispatches by the current **provider**, not model names or OAuth eligibility. For any `openai-codex` or `openai` model, it stores only `serviceTier: "priority"` in Pi's canonical `models.json` (honoring `PI_CODING_AGENT_DIR`):
 
 ```json
 {
@@ -72,6 +72,8 @@ For explicitly local library experiments, a temporary folder link reads the libr
   }
 }
 ```
+
+For an `openai` model, the same override goes under `providers.openai.modelOverrides`. Preferences are isolated by provider and model ID, so identical IDs in the two providers do not share Fast state.
 
 OFF removes only `serviceTier`; it never writes `"default"`. JSONC comments and unrelated configuration survive. There is no separate Fast config or model allowlist. State follows provider/model selection and survives restart; manual edits are read on lifecycle refresh and each request.
 
@@ -155,22 +157,22 @@ Coordination assumes a local filesystem and cooperating instances on the same ma
 
 ## Telegram Status Menu
 
-If `@llblab/pi-telegram` is loaded with the public status-line provider API, this extension registers an optional `/start` menu status row. The row is shown only while the active model uses the OpenAI Codex subscription provider:
+If `@llblab/pi-telegram` is loaded with the public status-line provider API, this extension registers an optional `/start` menu status row. The row is shown only while the active model uses `openai-codex` or `openai`:
 
 ```text
 codex: ██████▀▀▀▀ 6d
 ```
 
-The value is the same compact quota bar plus weekly reset countdown used by the terminal statusline, always with the `codex` label. When Fast is enabled for the active model, it appends plain-text ` fast`; without a usable quota report it shows `codex: fast`. The preference is reread when the menu is rendered, so toggles and model changes do not depend on a quota refresh. If `pi-telegram` is absent, older, or the active model is not a Codex subscription model, no Telegram row is added.
+The value is the same compact quota bar plus weekly reset countdown used by the terminal statusline, always with the `codex` label. When Fast is enabled for the active model, it appends plain-text ` fast`; without a usable quota report it shows `codex: fast`. The preference is reread when the menu is rendered, so toggles and model changes do not depend on a quota refresh. If `pi-telegram` is absent, older, or the active model uses another provider, no Telegram row is added.
 
 ## Auth
 
 The extension tries usage sources in this order:
 
-1. Pi's `openai-codex` provider auth
+1. Pi's subscription auth from `openai` or legacy `openai-codex` (active model first)
 2. `codex app-server --listen stdio://`
 
-OpenAI API keys are not ChatGPT Codex subscription auth and do not expose these quotas.
+Selecting an `openai` model enables the status and Fast toggle, and its ChatGPT subscription OAuth credentials can fetch the quota directly; a legacy `openai-codex` provider is not required. The extension uses Pi's resolved auth headers/token, checks `modelRegistry.isUsingOAuth` before using `openai` credentials, and keeps the Codex CLI fallback. OpenAI API keys are not ChatGPT subscription auth and do not expose these quotas; `openai` API-key credentials are skipped, not sent to the ChatGPT quota endpoint. Without subscription auth/quota, the quota status is `n/a` when both sources report an unavailable state. Fast works independently of subscription auth.
 
 ## License
 
