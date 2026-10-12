@@ -1,5 +1,8 @@
 /** Domain: quota transport. Owns: Pi auth, Codex app-server fallback and errors. Excludes: shared leadership and UI. */
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { assertObject, errorMessage, isOpenAICodexModel, normalizeAppServerResponse, normalizeBackendPayload, parseJsonObject, selectUsageSnapshot, type AppServerRateLimitResponse, type CodexUsageModel, type CodexUsageReport, type RateLimitStatusPayload, type UsageQueryError } from "./usage.ts";
@@ -196,6 +199,42 @@ async function queryViaCodexAppServer(
   }
 }
 
+/** Resolve Windows npm installs to the native process, not a .cmd shell or Node
+ * wrapper whose child could survive disposal. Other platforms retain PATH lookup.
+ */
+export function resolveCodexExecutable(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  arch: string = process.arch,
+): string {
+  if (platform !== "win32") return "codex";
+  const path = Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
+  const target = arch === "x64" ? "x86_64-pc-windows-msvc" : arch === "arm64" ? "aarch64-pc-windows-msvc" : undefined;
+  for (const entry of path.split(";")) {
+    // Ignore empty entries rather than searching the current working directory.
+    const directory = entry.replace(/^"(.*)"$/, "$1");
+    if (!directory) continue;
+    const executable = resolve(directory, "codex.exe");
+    if (existsSync(executable)) return executable;
+    if (!target || !existsSync(resolve(directory, "codex.cmd"))) continue;
+    const packageRoot = resolve(directory, "node_modules", "@openai", "codex");
+    const vendorRoots = [join(packageRoot, "vendor")];
+    try {
+      const require = createRequire(join(packageRoot, "package.json"));
+      vendorRoots.unshift(join(dirname(require.resolve(`@openai/codex-win32-${arch}/package.json`)), "vendor"));
+    } catch {
+      // Older Codex releases bundled vendor binaries inside the main package.
+    }
+    for (const vendor of vendorRoots) {
+      for (const layout of ["bin", "codex"]) {
+        const binary = join(vendor, target, layout, "codex.exe");
+        if (existsSync(binary)) return binary;
+      }
+    }
+  }
+  throw new Error("Could not find a native Codex executable on PATH. Install Codex with npm install -g @openai/codex@latest, then restart Pi so it inherits the updated PATH.");
+}
+
 class CodexAppServerClient {
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
@@ -213,8 +252,9 @@ class CodexAppServerClient {
     if (this.startPromise) return this.startPromise;
 
     this.startPromise = new Promise((resolve, reject) => {
-      const child = spawn("codex", ["app-server", "--listen", "stdio://"], {
+      const child = spawn(resolveCodexExecutable(), ["app-server", "--listen", "stdio://"], {
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       });
       this.child = child;
 

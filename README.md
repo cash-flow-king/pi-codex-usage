@@ -172,6 +172,8 @@ The extension tries usage sources in this order:
 1. Pi's subscription auth from `openai` or legacy `openai-codex` (active model first)
 2. `codex app-server --listen stdio://`
 
+On Windows, the fallback resolves a native `codex.exe` on PATH or inside the npm Codex installation behind `codex.cmd`, then launches it directly without a shell. Both current optional-package binaries and older bundled layouts are supported. If Codex is missing, install it with `npm install -g @openai/codex@latest` and restart Pi so it inherits the updated PATH.
+
 Selecting an `openai` model enables the status and Fast toggle, and its ChatGPT subscription OAuth credentials can fetch the quota directly; a legacy `openai-codex` provider is not required. The extension uses Pi's resolved auth headers/token, checks `modelRegistry.isUsingOAuth` before using `openai` credentials, and keeps the Codex CLI fallback. OpenAI API keys are not ChatGPT subscription auth and do not expose these quotas; `openai` API-key credentials are skipped, not sent to the ChatGPT quota endpoint. Without subscription auth/quota, the quota status is `n/a` when both sources report an unavailable state. Fast works independently of subscription auth.
 
 ## License
